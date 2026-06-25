@@ -6,9 +6,9 @@ Introducción a la programación
 Grupo 4
 Python 3.14.3
 Emanuel Rojas Benavides y Diego Andrés Herrrera Rivera
-Proyecto 1
-Descripción: El código de la PC controla el juego, las ventanas, las frases, la conexión WiFi y los puntajes.
-Versión del programa: 1.0.0
+Proyecto 1 y 2
+Descripción: El código de la PC controla el juego, las ventanas, las frases, la conexión WiFi, los puntajes y la visualización del incrementador en 5.
+Versión del programa: 2.0.0
 Requerimientos del sistema: Python 3
 """
 
@@ -77,6 +77,46 @@ def morse_a_texto(codigo):
         if p < len(palabras) - 1:
             texto += " "
     return texto
+
+
+# Convierte un valor de 0 a 15 a una cadena binaria de 4 bits.
+def bin4(valor):
+    valor = valor & 0x0F
+    return format(valor, "04b")
+
+
+# Calcula en software el resultado esperado del circuito incrementador en 5.
+def calcular_incremento5(caracter):
+    if not caracter:
+        return None
+
+    caracter = caracter[0].upper()
+
+    if caracter == "?" or caracter == " ":
+        return None
+
+    codigo_ascii = ord(caracter)
+    entrada = codigo_ascii & 0x0F
+    salida = (entrada + 5) & 0x0F
+
+    return {
+        "caracter": caracter,
+        "ascii": codigo_ascii,
+        "entrada": entrada,
+        "entrada_bin": bin4(entrada),
+        "salida": salida,
+        "salida_bin": bin4(salida)
+    }
+
+
+# Obtiene la ultima secuencia Morse completa dentro de un texto Morse.
+def ultima_secuencia_morse(codigo):
+    partes = codigo.replace("/", " ").strip().split()
+
+    if not partes:
+        return ""
+
+    return partes[-1]
 
 
 # Deja solo puntos y rayas para comparar la secuencia.
@@ -240,6 +280,9 @@ class App:
         self.callback = None
         self.ultima_consulta = 0
         self.pantalla = ""
+        self.inc5_activo = False
+        self.inc5_ultimo = "Incrementador +5: switch apagado"
+        self.inc5_var = None
 
         # Abre la primera pantalla y deja activo el ciclo de Tkinter.
         self.abrir_inicio()
@@ -291,6 +334,80 @@ class App:
     def marcador(self):
         tk.Label(self.win, text=self.texto_marcador()).pack(pady=4)
 
+    # Actualiza el texto visible del incrementador en 5 cuando existe una etiqueta activa.
+    def actualizar_inc5_texto(self, texto):
+        self.inc5_ultimo = texto
+
+        try:
+            if self.inc5_var is not None:
+                self.inc5_var.set(texto)
+        except Exception:
+            pass
+
+    # Crea una etiqueta de estado para el circuito incrementador en 5.
+    def etiqueta_inc5(self):
+        self.inc5_var = tk.StringVar(value=self.inc5_ultimo)
+        tk.Label(self.win, textvariable=self.inc5_var, wraplength=580, justify="center").pack(pady=6)
+
+    # Procesa el estado del switch de habilitacion del incrementador.
+    def recibir_inc5_switch(self, linea):
+        estado = linea.split(":", 1)[1].strip().upper()
+        nuevo_estado = estado == "ON"
+        cambio = nuevo_estado != self.inc5_activo
+        self.inc5_activo = nuevo_estado
+
+        # La consulta periodica no debe borrar el ultimo resultado mostrado.
+        if cambio or self.inc5_ultimo.startswith("Incrementador +5: switch"):
+            if self.inc5_activo:
+                self.actualizar_inc5_texto("Incrementador +5: switch encendido. Esperando letra.")
+            else:
+                self.actualizar_inc5_texto("Incrementador +5: switch apagado. Entradas GPIO 19-22 en 0000.")
+
+    # Procesa el resultado enviado por la Pico W para mostrarlo en pantalla.
+    def recibir_inc5_resultado(self, linea):
+        partes = linea.split(":")
+
+        if len(partes) < 6:
+            return
+
+        caracter = partes[1]
+        ascii_texto = partes[2]
+        entrada_bin = partes[3]
+        salida_bin = partes[4]
+        salida_dec = partes[5]
+
+        if caracter == "TEST":
+            self.actualizar_inc5_texto(
+                "Incrementador +5: prueba | entrada " + entrada_bin +
+                " | salida esperada " + salida_bin + " (" + salida_dec + ")"
+            )
+        else:
+            self.actualizar_inc5_texto(
+                "Incrementador +5: letra " + caracter +
+                " | ASCII " + ascii_texto +
+                " | entrada GPIO22-19 " + entrada_bin +
+                " | salida esperada " + salida_bin + " (" + salida_dec + ")"
+            )
+
+    # Envia a la Pico W una letra escrita en la PC para alimentar los pines 19-22.
+    def enviar_inc5_caracter_pc(self, caracter):
+        info = calcular_incremento5(caracter)
+
+        if info is None:
+            return
+
+        self.pico.enviar("INC5_CHAR:" + info["caracter"])
+
+        if self.inc5_activo:
+            self.actualizar_inc5_texto(
+                "Incrementador +5: letra " + info["caracter"] +
+                " | ASCII " + str(info["ascii"]) +
+                " | entrada GPIO22-19 " + info["entrada_bin"] +
+                " | salida esperada " + info["salida_bin"] + " (" + str(info["salida"]) + ")"
+            )
+        else:
+            self.actualizar_inc5_texto("Incrementador +5: switch apagado. No se envia valor a GPIO 19-22.")
+
     # Revisa mensajes de la maqueta sin congelar la ventana.
     def revisar(self):
         # Procesa todos los mensajes pendientes de la maqueta.
@@ -303,6 +420,7 @@ class App:
                     self.estado_var.set("Maqueta conectada")
                 self.pico.enviar("PING")
                 self.pico.enviar("MODE?")
+                self.pico.enviar("INC5_STATUS?")
                 if self.pantalla == "INICIO":
                     self.abrir_modo()
 
@@ -319,6 +437,14 @@ class App:
                     if self.pantalla not in ("CAPTURA", "PC_MORSE", "PRESENTANDO"):
                         self.abrir_modo()
 
+            # Estado del switch nuevo del incrementador en 5.
+            elif linea.startswith("INC5_SWITCH:"):
+                self.recibir_inc5_switch(linea)
+
+            # Resultado esperado por software del incrementador en 5.
+            elif linea.startswith("INC5_RESULT:"):
+                self.recibir_inc5_resultado(linea)
+
             elif self.callback:
                 self.callback(linea)
 
@@ -326,6 +452,7 @@ class App:
         # Pregunta el modo cada segundo para detectar cambios.
         if self.pico.ser and ahora - self.ultima_consulta > 1:
             self.pico.enviar("MODE?")
+            self.pico.enviar("INC5_STATUS?")
             self.ultima_consulta = ahora
 
         self.root.after(200, self.revisar)
@@ -357,12 +484,38 @@ class App:
     def abrir_modo(self):
         self.pantalla = "MODO"
         self.callback = None
-        self.abrir("Modo", 520, 280)
+        self.abrir("Modo", 520, 340)
         self.titulo("Modo: " + self.nombre_modo())
+        self.etiqueta_inc5()
         self.boton("Configurar", self.abrir_config_escucha if self.modo == "ESCUCHA" else self.abrir_config_simple)
         self.boton("Frases", self.abrir_frases)
         self.boton("Probar LEDs", lambda: self.pico.enviar("DEMO"))
+        self.boton("Probar incremento +5", self.abrir_prueba_inc5)
         self.boton("Salir", self.salir)
+
+    # Abre una prueba manual para enviar una entrada de 4 bits al circuito incrementador en 5.
+    def abrir_prueba_inc5(self):
+        self.pantalla = "INC5_TEST"
+        self.callback = None
+        self.abrir("Prueba incremento +5", 560, 360)
+        self.titulo("Prueba manual del incrementador +5")
+        self.texto("Digite 4 bits en orden MSB a LSB. Ejemplo: 0101 se envia a GPIO 22, 21, 20 y 19.")
+        self.etiqueta_inc5()
+
+        entrada_var = tk.StringVar(value="0101")
+        tk.Entry(self.win, textvariable=entrada_var, width=12, justify="center").pack(pady=8)
+
+        def probar():
+            valor = entrada_var.get().strip()
+
+            if len(valor) != 4 or any(c not in "01" for c in valor):
+                messagebox.showwarning("Error", "Digite exactamente 4 bits: 0 o 1")
+                return
+
+            self.pico.enviar("INC5_TEST:" + valor)
+
+        self.boton("Enviar prueba", probar)
+        self.boton("Volver", self.abrir_modo)
 
     # Actualiza la lista visual de frases.
     def actualizar_lista(self, lista):
@@ -545,7 +698,7 @@ class App:
     def abrir_pc_morse(self, jugador, despues):
         self.pantalla = "PC_MORSE"
         self.callback = None
-        self.abrir("PC", 620, 430)
+        self.abrir("PC", 620, 500)
         self.titulo("Jugador " + jugador + " en PC")
         self.marcador()
         self.texto("Use la tecla M.")
@@ -561,6 +714,20 @@ class App:
         tk.Label(self.win, textvariable=estado_var).pack(pady=4)
         tk.Label(self.win, textvariable=codigo_var, width=50, height=3).pack(pady=8)
         tk.Label(self.win, textvariable=texto_var).pack(pady=4)
+        self.etiqueta_inc5()
+
+        inc5_procesadas = {"n": 0}
+
+        # Envia al circuito las letras Morse completas que todavia no se han procesado.
+        def procesar_incremento5_pc():
+            secuencias = codigo_var.get().replace("/", " ").strip().split()
+
+            for secuencia in secuencias[inc5_procesadas["n"]:]:
+                caracter = MORSE_INV.get(secuencia, "")
+                if caracter:
+                    self.enviar_inc5_caracter_pc(caracter)
+
+            inc5_procesadas["n"] = len(secuencias)
 
         # Actualiza el texto traducido mientras el jugador escribe Morse.
         def actualizar():
@@ -592,6 +759,7 @@ class App:
             control["fin"] = True
             cancelar_timer()
             estado_var.set("Terminado")
+            procesar_incremento5_pc()
             datos = evaluar_intento(self.frase, codigo_var.get().strip())
             self.guardar_puntos(jugador, "PC", datos)
             self.root.after(300, pasar)
@@ -612,8 +780,10 @@ class App:
             if control["empezo"]:
                 pausa = ahora - inicio_press["ultima_suelta"]
                 if pausa >= 7 * self.unidad:
+                    procesar_incremento5_pc()
                     codigo_var.set(codigo_var.get() + " / ")
                 elif pausa >= 3 * self.unidad:
+                    procesar_incremento5_pc()
                     codigo_var.set(codigo_var.get() + " ")
                 actualizar()
 
@@ -643,7 +813,7 @@ class App:
     def abrir_pico_capture(self, jugador, tipo, despues):
         self.pantalla = "CAPTURA"
         self.callback = None
-        self.abrir("Maqueta", 620, 450)
+        self.abrir("Maqueta", 620, 520)
         self.titulo("Jugador " + jugador + " en maqueta")
         self.marcador()
         self.texto("Use el boton fisico.")
@@ -662,6 +832,7 @@ class App:
         tk.Label(self.win, textvariable=estado_var).pack(pady=4)
         tk.Label(self.win, textvariable=codigo_var, width=50, height=2).pack(pady=6)
         tk.Label(self.win, textvariable=texto_var).pack(pady=4)
+        self.etiqueta_inc5()
         tk.Label(self.win, textvariable=tiempo_var).pack(pady=4)
 
         datos = {"morse": "", "texto": "", "tiempo": 0}

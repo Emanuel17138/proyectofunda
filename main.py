@@ -6,9 +6,9 @@ Introducción a la programación
 Grupo 4
 Python 3.14.3
 Emanuel Rojas Benavides y Diego Andrés Herrrera Rivera
-Proyecto 1
-Descripción: El código de la Raspberry Pi Pico W controla la maqueta, el botón Morse, el buzzer, los LEDs, el DIP switch y la conexión con la PC.
-Versión del programa: 1.0.0
+Proyecto 1 y 2
+Descripción: El código de la Raspberry Pi Pico W controla la maqueta, el botón Morse, el buzzer, los LEDs, el DIP switch, el circuito incrementador en 5 y la conexión con la PC.
+Versión del programa: 2.0.0
 Requerimientos del sistema: MicroPython
 """
 
@@ -28,6 +28,14 @@ DISCOVERY_PORT = 5001
 buzzer = Pin(5, Pin.OUT)
 boton = Pin(16, Pin.IN, Pin.PULL_UP)
 dip = Pin(17, Pin.IN, Pin.PULL_UP)
+
+# Nuevo circuito del Proyecto II. El switch de habilitacion esta en GPIO 18.
+# Las entradas del circuito incrementador en 5 usan GPIO 19 a GPIO 22.
+# GPIO 19 es el bit menos significativo (LSB) y GPIO 22 es el bit mas significativo (MSB).
+switch_inc5 = Pin(18, Pin.IN, Pin.PULL_UP)
+inc5_pines = [Pin(19, Pin.OUT), Pin(20, Pin.OUT), Pin(21, Pin.OUT), Pin(22, Pin.OUT)]
+INC5_SWITCH_ACTIVO_EN_BAJO = True
+
 clk = Pin(26, Pin.OUT)
 data = Pin(27, Pin.OUT)
 
@@ -163,6 +171,75 @@ def modo_actual():
     return "ESCUCHA"
 
 
+# Devuelve True cuando el switch nuevo habilita el incrementador en 5.
+def inc5_switch_activo():
+    valor = switch_inc5.value()
+
+    # Con pull-up, lo normal es que el switch activo cierre a GND y lea 0.
+    if INC5_SWITCH_ACTIVO_EN_BAJO:
+        return valor == 0
+
+    return valor == 1
+
+
+# Convierte un valor de 0 a 15 a una cadena binaria de 4 bits.
+def inc5_bin4(valor):
+    valor = valor & 0x0F
+    salida = ""
+
+    for bit in range(3, -1, -1):
+        salida += "1" if ((valor >> bit) & 1) else "0"
+
+    return salida
+
+
+# Limpia las 4 entradas enviadas al circuito incrementador.
+def inc5_limpiar_entradas():
+    for pin in inc5_pines:
+        pin.value(0)
+
+
+# Escribe los 4 bits menos significativos en los pines 19, 20, 21 y 22.
+def inc5_escribir_entradas(valor):
+    valor = valor & 0x0F
+
+    # bit 0 -> GPIO 19 (LSB), bit 1 -> GPIO 20, bit 2 -> GPIO 21, bit 3 -> GPIO 22 (MSB).
+    for bit, pin in enumerate(inc5_pines):
+        pin.value((valor >> bit) & 1)
+
+
+# Procesa una letra para el Proyecto II: ASCII, 4 LSB y resultado esperado de sumar 5.
+def inc5_procesar_caracter(caracter, origen="PICO"):
+    if not caracter:
+        return
+
+    caracter = caracter[0].upper()
+
+    if caracter == "?" or caracter == " ":
+        return
+
+    if not inc5_switch_activo():
+        inc5_limpiar_entradas()
+        enviar("INC5_SWITCH:OFF")
+        return
+
+    codigo_ascii = ord(caracter)
+    entrada = codigo_ascii & 0x0F
+    salida = (entrada + 5) & 0x0F
+
+    inc5_escribir_entradas(entrada)
+
+    # Formato: caracter, ASCII decimal, entrada de 4 bits, salida de 4 bits y salida decimal.
+    enviar("INC5_SWITCH:ON")
+    enviar(
+        "INC5_RESULT:" + caracter + ":" +
+        str(codigo_ascii) + ":" +
+        inc5_bin4(entrada) + ":" +
+        inc5_bin4(salida) + ":" +
+        str(salida)
+    )
+
+
 # Limpia la frase y deja solo caracteres validos.
 def normalizar_frase(frase):
     salida = ""
@@ -283,6 +360,7 @@ def capturar_morse(limite=25, unidad=0.2):
 
                 if pausa >= 7 * unidad:
                     if letra != "":
+                        inc5_procesar_caracter(morse_inv.get(letra, "?"), "PICO")
                         codigo += letra + " / "
                         letra = ""
                         enviar("GAP:WORD")
@@ -290,6 +368,7 @@ def capturar_morse(limite=25, unidad=0.2):
 
                 elif pausa >= 3 * unidad:
                     if letra != "":
+                        inc5_procesar_caracter(morse_inv.get(letra, "?"), "PICO")
                         codigo += letra + " "
                         letra = ""
                         enviar("GAP:LETTER")
@@ -331,6 +410,7 @@ def capturar_morse(limite=25, unidad=0.2):
 
     # Agrega la ultima letra si quedo pendiente.
     if letra != "":
+        inc5_procesar_caracter(morse_inv.get(letra, "?"), "PICO")
         codigo += letra
 
     tiempo_total = time.ticks_diff(time.ticks_ms(), inicio_total) / 1000
@@ -476,10 +556,52 @@ def procesar_comando(linea):
         enviar("MODE:" + modo_actual())
         return
 
+    # La PC pregunta si el switch del incrementador en 5 esta activo.
+    if linea == "INC5_STATUS?":
+        enviar("INC5_SWITCH:" + ("ON" if inc5_switch_activo() else "OFF"))
+        return
+
+    # La PC envia una letra capturada con el teclado para alimentar el circuito incrementador.
+    if linea.startswith("INC5_CHAR:"):
+        caracter = linea.split(":", 1)[1].strip().upper()
+        inc5_procesar_caracter(caracter, "PC")
+        enviar("DONE:INC5")
+        return
+
+    # Permite probar manualmente una entrada de 4 bits desde la PC.
+    if linea.startswith("INC5_TEST:"):
+        valor_texto = linea.split(":", 1)[1].strip()
+
+        try:
+            if len(valor_texto) == 4 and all(c in "01" for c in valor_texto):
+                entrada = int(valor_texto, 2)
+            else:
+                entrada = int(valor_texto)
+        except Exception:
+            enviar("ERROR:INC5_VALOR_NO_VALIDO")
+            return
+
+        if entrada < 0 or entrada > 15:
+            enviar("ERROR:INC5_VALOR_NO_VALIDO")
+            return
+
+        if not inc5_switch_activo():
+            inc5_limpiar_entradas()
+            enviar("INC5_SWITCH:OFF")
+            return
+
+        salida = (entrada + 5) & 0x0F
+        inc5_escribir_entradas(entrada)
+        enviar("INC5_SWITCH:ON")
+        enviar("INC5_RESULT:TEST:-:" + inc5_bin4(entrada) + ":" + inc5_bin4(salida) + ":" + str(salida))
+        enviar("DONE:INC5_TEST")
+        return
+
     # Limpia luces y sonido.
     if linea == "CLEAR":
         limpiar_panel()
         buzzer_off()
+        inc5_limpiar_entradas()
         enviar("DONE:CLEAR")
         return
 
@@ -537,6 +659,7 @@ def procesar_comando(linea):
 # Estado inicial: todo apagado.
 limpiar_panel()
 buzzer_off()
+inc5_limpiar_entradas()
 
 # Bucle principal: si se desconecta, vuelve a conectar.
 while True:
@@ -544,17 +667,27 @@ while True:
 
     # Avisa a la PC que la maqueta esta lista y manda el modo actual.
     ultimo_modo = modo_actual()
+    ultimo_inc5 = inc5_switch_activo()
     enviar("READY")
     enviar("MODE:" + ultimo_modo)
+    enviar("INC5_SWITCH:" + ("ON" if ultimo_inc5 else "OFF"))
 
     # Bucle interno: ya conectado, escucha comandos de la PC.
     while True:
         modo = modo_actual()
+        estado_inc5 = inc5_switch_activo()
 
         # Si cambia el DIP switch, se avisa a la PC.
         if modo != ultimo_modo:
             ultimo_modo = modo
             enviar("MODE:" + modo)
+
+        # Si cambia el switch del incrementador, se avisa a la PC.
+        if estado_inc5 != ultimo_inc5:
+            ultimo_inc5 = estado_inc5
+            if not estado_inc5:
+                inc5_limpiar_entradas()
+            enviar("INC5_SWITCH:" + ("ON" if estado_inc5 else "OFF"))
 
         comando = leer_linea_wifi()
 
